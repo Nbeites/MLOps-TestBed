@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  train:
+    build: .
+    container_name: iris-mlops-train
+    command: python train/train.py
+    # Mount project into container so model.joblib is written back to host
+    volumes:
+      - .:/app
+    # To upload the model to GCS, pass env vars on the command line, e.g.:
+    #   docker compose run --rm -e GCS_BUCKET=your-bucket -e GCS_MODEL_BLOB=models/iris/model.joblib train
+
+  api:
+    build: .
+    container_name: iris-mlops-api
+    volumes:
+      - .:/app
+    ports:
+      - "8080:8080"
+    # To load the model from GCS instead of a local file, pass env vars, e.g.:
+    #   docker compose run --rm -e MODEL_BUCKET=your-bucket -e MODEL_BLOB=models/iris/model.joblib api
