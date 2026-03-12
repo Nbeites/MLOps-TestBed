@@ -1,0 +1,55 @@
+steps:
+  # 1) Train model and upload to GCS
+  - name: python:3.13-slim
+    id: train-model
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install uv
+        uv run train/train.py
+    env:
+      - GCS_BUCKET=$_MODEL_BUCKET
+      - GCS_MODEL_BLOB=models/iris/$_MODEL_VERSION/model.joblib
+
+  # 2) Build and push container image
+  - name: gcr.io/cloud-builders/docker
+    id: build-image
+    args:
+      - build
+      - "-t"
+      - "$_IMAGE"
+      - "."
+
+  - name: gcr.io/cloud-builders/docker
+    id: push-image
+    args:
+      - push
+      - "$_IMAGE"
+
+  # 3) Deploy to Cloud Run
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy-cloud-run
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud run deploy $_SERVICE_NAME \
+          --image=$_IMAGE \
+          --region=$_REGION \
+          --allow-unauthenticated \
+          --min-instances=0 \
+          --max-instances=1 \
+          --set-env-vars=MODEL_BUCKET=$_MODEL_BUCKET,MODEL_BLOB=models/iris/$_MODEL_VERSION/model.joblib
+
+substitutions:
+  # Provide sensible defaults; override in trigger or CLI
+  _REGION: europe-west1
+  _SERVICE_NAME: iris-mlops-api
+  _IMAGE: gcr.io/$PROJECT_ID/iris-mlops-api:$SHORT_SHA
+  _MODEL_BUCKET: $PROJECT_ID-iris-mlops-demo
+  _MODEL_VERSION: $SHORT_SHA
+
+images:
+  - $_IMAGE
+
