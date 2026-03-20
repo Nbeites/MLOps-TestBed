@@ -1,132 +1,218 @@
-## Quickstart: Run the Iris MLOps Demo
+# Quickstart: Full Command Runbook (No Hidden Steps)
 
-This is the **short, practical guide**. For full details, see `README.md`.
+This is a strict, explicit command sequence for a new engineer.
 
-All commands are run from the project root: `MLOps-TestBed`.
-
----
-
-### 1. Prerequisites
-
-- `uv` installed (Python dependency manager).
-- `curl` installed.
-- (Optional) `docker` & `docker compose` if you want to use containers.
-- (Optional) `gcloud` if you want to deploy to Cloud Run.
-
----
-
-### 2. Local Run (no Docker, no GCS)
+## 0) Open Cloud Shell and clone repo
 
 ```bash
-# 1) Train the model (creates model.joblib locally)
-uv run train/train.py
-
-# 2) Start the API
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8080
+git clone https://github.com/<YOUR_GITHUB_OWNER>/MLOps-TestBed.git
+cd MLOps-TestBed
 ```
 
-In another terminal:
+## 1) Set all variables once
 
 ```bash
-curl -X POST "http://127.0.0.1:8080/predict" \
+export DEV_PROJECT_ID="<YOUR_DEV_PROJECT_ID>"
+export PROD_PROJECT_ID="<YOUR_PROD_PROJECT_ID>"
+export DEV_REGION="europe-west1"
+export PROD_REGION="europe-west1"
+export GITHUB_OWNER="<YOUR_GITHUB_OWNER>"
+export REPO_NAME="MLOps-TestBed"
+```
+
+If DEV and PROD are the same project, set both IDs to the same value.
+
+## 2) Authenticate and set ADC
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+```
+
+## 3) Enable required Google APIs (both projects)
+
+```bash
+for PROJECT in "$DEV_PROJECT_ID" "$PROD_PROJECT_ID"; do
+  gcloud services enable \
+    cloudbuild.googleapis.com \
+    run.googleapis.com \
+    artifactregistry.googleapis.com \
+    storage.googleapis.com \
+    iam.googleapis.com \
+    --project "$PROJECT"
+done
+```
+
+## 4) Grant IAM to Cloud Build service accounts (both projects)
+
+`cloudbuild.yaml` trains (GCS), pushes image, and deploys to Cloud Run. The Cloud Build service account needs these permissions.
+
+```bash
+for PROJECT in "$DEV_PROJECT_ID" "$PROD_PROJECT_ID"; do
+  PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
+  CB_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
+
+  gcloud projects add-iam-policy-binding "$PROJECT" \
+    --member="serviceAccount:${CB_SA}" \
+    --role="roles/run.admin"
+
+  gcloud projects add-iam-policy-binding "$PROJECT" \
+    --member="serviceAccount:${CB_SA}" \
+    --role="roles/iam.serviceAccountUser"
+
+  gcloud projects add-iam-policy-binding "$PROJECT" \
+    --member="serviceAccount:${CB_SA}" \
+    --role="roles/storage.admin"
+
+  gcloud projects add-iam-policy-binding "$PROJECT" \
+    --member="serviceAccount:${CB_SA}" \
+    --role="roles/artifactregistry.writer"
+done
+```
+
+## 5) Fill DEV and PROD Terragrunt files
+
+Edit:
+
+- `infra/envs/dev/cloudbuild/terragrunt.hcl`
+- `infra/envs/prod/cloudbuild/terragrunt.hcl`
+
+Replace all placeholders:
+
+- `YOUR_DEV_PROJECT_ID`
+- `YOUR_PROD_PROJECT_ID`
+- `YOUR_GITHUB_OWNER`
+
+Optional: adjust `_SERVICE_NAME`, `_MODEL_BUCKET`, `_REGION`.
+
+## 6) Create DEV trigger
+
+```bash
+gcloud config set project "$DEV_PROJECT_ID"
+cd infra/envs/dev/cloudbuild
+terragrunt init
+terragrunt apply -auto-approve
+cd ../../../..
+```
+
+Verify DEV trigger:
+
+```bash
+gcloud builds triggers list --project "$DEV_PROJECT_ID"
+```
+
+## 7) Create PROD trigger
+
+```bash
+gcloud config set project "$PROD_PROJECT_ID"
+cd infra/envs/prod/cloudbuild
+terragrunt init
+terragrunt apply -auto-approve
+cd ../../../..
+```
+
+Verify PROD trigger:
+
+```bash
+gcloud builds triggers list --project "$PROD_PROJECT_ID"
+```
+
+## 8) Validate pipeline manually before GitHub push (optional but recommended)
+
+DEV manual build:
+
+```bash
+gcloud config set project "$DEV_PROJECT_ID"
+gcloud builds submit --config cloudbuild.yaml .
+```
+
+PROD manual build:
+
+```bash
+gcloud config set project "$PROD_PROJECT_ID"
+gcloud builds submit --config cloudbuild.yaml .
+```
+
+## 9) Push to `develop` (deploy DEV automatically)
+
+```bash
+git checkout develop
+git add .
+git commit -m "test: trigger dev pipeline"
+git push origin develop
+```
+
+Watch DEV build:
+
+```bash
+gcloud config set project "$DEV_PROJECT_ID"
+gcloud builds list --project "$DEV_PROJECT_ID" --limit=5
+BUILD_ID="$(gcloud builds list --project "$DEV_PROJECT_ID" --limit=1 --format='value(id)')"
+gcloud builds log "$BUILD_ID" --project "$DEV_PROJECT_ID"
+```
+
+## 10) Push to `main` (deploy PROD automatically)
+
+```bash
+git checkout main
+git merge --no-ff develop -m "release: promote develop to main"
+git push origin main
+```
+
+Watch PROD build:
+
+```bash
+gcloud config set project "$PROD_PROJECT_ID"
+gcloud builds list --project "$PROD_PROJECT_ID" --limit=5
+BUILD_ID="$(gcloud builds list --project "$PROD_PROJECT_ID" --limit=1 --format='value(id)')"
+gcloud builds log "$BUILD_ID" --project "$PROD_PROJECT_ID"
+```
+
+## 11) Get Cloud Run URLs and smoke test
+
+DEV:
+
+```bash
+gcloud config set project "$DEV_PROJECT_ID"
+gcloud run services list --region "$DEV_REGION" --project "$DEV_PROJECT_ID"
+DEV_URL="$(gcloud run services describe iris-mlops-api-dev --region "$DEV_REGION" --project "$DEV_PROJECT_ID" --format='value(status.url)')"
+echo "$DEV_URL"
+curl -X POST "${DEV_URL}/predict" \
   -H "Content-Type: application/json" \
-  -d '{
-    "sepal_length": 5.1,
-    "sepal_width": 3.5,
-    "petal_length": 1.4,
-    "petal_width": 0.2
-  }'
+  -d '{"sepal_length":5.1,"sepal_width":3.5,"petal_length":1.4,"petal_width":0.2}'
 ```
 
----
-
-### 3. Docker: Train and run the API
-
-**Step 1 — Train the model** (writes `model.joblib` to the project directory):
+PROD:
 
 ```bash
-docker compose run --rm train
-```
-
-**Step 2 — Run the API** (uses the model from the project directory):
-
-```bash
-docker compose up api
-```
-
-Or run the API in the foreground once and exit:
-
-```bash
-docker compose run --rm -p 8080:8080 api
-```
-
-Then in another terminal:
-
-```bash
-curl -X POST "http://127.0.0.1:8080/predict" \
+gcloud config set project "$PROD_PROJECT_ID"
+gcloud run services list --region "$PROD_REGION" --project "$PROD_PROJECT_ID"
+PROD_URL="$(gcloud run services describe iris-mlops-api-prod --region "$PROD_REGION" --project "$PROD_PROJECT_ID" --format='value(status.url)')"
+echo "$PROD_URL"
+curl -X POST "${PROD_URL}/predict" \
   -H "Content-Type: application/json" \
-  -d '{
-    "sepal_length": 6.1,
-    "sepal_width": 2.8,
-    "petal_length": 4.7,
-    "petal_width": 1.2
-  }'
+  -d '{"sepal_length":6.1,"sepal_width":2.8,"petal_length":4.7,"petal_width":1.2}'
 ```
 
-Stop the API (if you used `docker compose up api`):
+## 12) Quick troubleshooting commands
 
 ```bash
-docker compose down
+# List recent build failures
+gcloud builds list --filter="status=FAILURE" --limit=10
+
+# Describe latest build in current project
+LATEST_BUILD="$(gcloud builds list --limit=1 --format='value(id)')"
+gcloud builds describe "$LATEST_BUILD"
+
+# Show Cloud Run revisions
+gcloud run revisions list --region "$DEV_REGION" --project "$DEV_PROJECT_ID"
+gcloud run revisions list --region "$PROD_REGION" --project "$PROD_PROJECT_ID"
 ```
 
----
+## 13) Files used by this runbook
 
-### 4. Deploy to Cloud Run (minimal flow)
-
-High-level steps (details in `README.md`):
-
-1. Create a bucket and train/upload model:
-
-   ```bash
-   export PROJECT_ID=your-project-id
-   export REGION=europe-west1
-   export BUCKET_NAME=${PROJECT_ID}-iris-mlops-demo
-
-   gcloud storage buckets create gs://${BUCKET_NAME} --location=${REGION}
-
-   export GCS_BUCKET=${BUCKET_NAME}
-   export GCS_MODEL_BLOB=models/iris/model.joblib
-
-   uv run train/train.py
-   ```
-
-2. Deploy from source to Cloud Run:
-
-   ```bash
-   export SERVICE_NAME=iris-mlops-api
-
-   gcloud run deploy ${SERVICE_NAME} \
-     --source . \
-     --region ${REGION} \
-     --project ${PROJECT_ID} \
-     --allow-unauthenticated \
-     --min-instances=0 \
-     --max-instances=1 \
-     --set-env-vars=MODEL_BUCKET=${BUCKET_NAME},MODEL_BLOB=models/iris/model.joblib
-   ```
-
-3. Test the Cloud Run endpoint (replace URL with your service URL):
-
-   ```bash
-   export SERVICE_URL="https://iris-mlops-api-xyz-uc.a.run.app"
-
-   curl -X POST "${SERVICE_URL}/predict" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "sepal_length": 6.1,
-       "sepal_width": 2.8,
-       "petal_length": 4.7,
-       "petal_width": 1.2
-     }'
-   ```
+- `cloudbuild.yaml`
+- `infra/terraform/modules/cloudbuild_trigger/trigger.tf`
+- `infra/envs/dev/cloudbuild/terragrunt.hcl`
+- `infra/envs/prod/cloudbuild/terragrunt.hcl`
 
